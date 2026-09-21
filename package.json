@@ -1,1 +1,14 @@
-
+{
+  "name": "telugu-english-phone-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/genai": "latest",
+    "express": "latest",
+    "ws": "latest"
+  }
+}
