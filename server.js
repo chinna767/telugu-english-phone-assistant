@@ -6,10 +6,6 @@ import { GoogleGenAI, Modality } from "@google/genai";
 const PORT = process.env.PORT || 10000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-if (!GEMINI_API_KEY) {
-  console.error("ERROR: GEMINI_API_KEY is not configured.");
-}
-
 const app = express();
 
 app.get("/", (_req, res) => {
@@ -22,71 +18,86 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    geminiConfigured: Boolean(GEMINI_API_KEY),
+  });
 });
 
 const server = http.createServer(app);
+
 const wss = new WebSocketServer({
   server,
   path: "/media",
 });
 
-const ai = new GoogleGenAI({
-  apiKey: GEMINI_API_KEY,
-});
+const ai = GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
+  : null;
 
 const SYSTEM_INSTRUCTION = `
 You are a personal phone assistant.
 
-You speak ONLY Telugu and English.
+LANGUAGES:
+Speak ONLY Telugu and English.
+Understand Telugu, English, and natural Telugu-English mixed speech.
 
-You understand:
-- Telugu
-- English
-- Natural Telugu-English mixed speech.
+VOICE PERSONALITY:
+You are a young adult female voice.
+You sound natural, warm, friendly, lively and expressive.
+You have a dynamic conversational personality.
+You sound like a real human phone assistant, NOT a robotic IVR.
+Use natural Indian English pronunciation.
+Use natural Telugu pronunciation.
+Do not exaggerate emotions.
 
-Your voice personality:
-- Young adult female.
-- Natural, warm and friendly.
-- Dynamic and expressive.
-- Confident but not overly formal.
-- Natural Indian English pronunciation.
-- Natural Telugu pronunciation.
-- Never sound like a robotic IVR.
+PHONE CONVERSATION STYLE:
+Keep responses short and natural.
+Do not give long speeches.
+Allow the caller to speak.
+Do not interrupt unnecessarily.
 
-You are answering phone calls on behalf of the owner
-when he is unavailable.
-
+ROLE:
+You answer calls on behalf of the owner when he is unavailable.
 Never pretend to be the owner.
+Never claim to be physically present with the owner.
 
-Keep phone responses short and conversational.
+OWNER:
+If the caller asks for the owner, say that the owner is currently unavailable.
 
-If the caller asks for the owner:
-say that the owner is currently unavailable.
+MESSAGES:
+If the caller wants to leave a message, listen carefully,
+acknowledge the message, and do not invent or modify details.
 
-If the caller wants to leave a message:
-listen carefully and acknowledge it.
+TRUTHFULNESS:
+Never invent personal information.
+Never guess information about the owner.
+If you do not know something, say so naturally.
 
-Do not invent information.
+LANGUAGE MIXING:
+If the caller speaks Telugu-English naturally,
+you may respond naturally in Telugu-English.
+If the caller speaks mostly Telugu, respond mostly Telugu.
+If the caller speaks mostly English, respond mostly English.
 
-Do not make up personal details about the owner.
-
-Use natural Telugu-English code switching when appropriate.
-
-Example style:
-"Aayana ippudu available ga leru. Meeku emaina message cheppala?"
-
-When the conversation is finished:
-say goodbye naturally.
+GOODBYE:
+When the caller clearly finishes the conversation,
+say a short natural goodbye and stop responding.
 
 Example:
 "Okay, thank you. Bye!"
 
-Do not continue talking after the caller clearly says goodbye.
+Do not continue the conversation after a clear goodbye.
 `;
 
 wss.on("connection", async (exotelWs) => {
-  console.log("Exotel WebSocket connected.");
+  console.log("Exotel Voicebot WebSocket connected.");
+
+  if (!ai) {
+    console.error("GEMINI_API_KEY is missing.");
+    exotelWs.close();
+    return;
+  }
 
   let streamSid = null;
   let geminiSession = null;
@@ -109,7 +120,6 @@ wss.on("connection", async (exotelWs) => {
           },
         },
 
-        // Let Gemini detect natural pauses in phone speech.
         realtimeInputConfig: {
           automaticActivityDetection: {
             disabled: false,
@@ -123,7 +133,11 @@ wss.on("connection", async (exotelWs) => {
         },
 
         onmessage(message) {
-          if (closed || exotelWs.readyState !== 1) {
+          if (
+            closed ||
+            !message ||
+            exotelWs.readyState !== 1
+          ) {
             return;
           }
 
@@ -137,20 +151,22 @@ wss.on("connection", async (exotelWs) => {
               continue;
             }
 
-            const mimeType = inlineData.mimeType || "";
+            const mimeType =
+              inlineData.mimeType || "";
 
-            // Gemini Live normally returns 24 kHz PCM.
-            if (!mimeType.includes("audio/pcm")) {
+            if (!mimeType.startsWith("audio/pcm")) {
               continue;
             }
 
+            // Gemini Live audio output is 24 kHz,
+            // 16-bit, mono, little-endian PCM.
             const geminiAudio = Buffer.from(
               inlineData.data,
               "base64"
             );
 
-            // Gemini: 24 kHz PCM
-            // Exotel: 8 kHz PCM
+            // Exotel Voicebot expects:
+            // 8 kHz, 16-bit, mono PCM.
             const exotelAudio = resamplePCM16(
               geminiAudio,
               24000,
@@ -162,7 +178,8 @@ wss.on("connection", async (exotelWs) => {
                 event: "media",
                 stream_sid: streamSid,
                 media: {
-                  payload: exotelAudio.toString("base64"),
+                  payload:
+                    exotelAudio.toString("base64"),
                 },
               })
             );
@@ -170,7 +187,10 @@ wss.on("connection", async (exotelWs) => {
         },
 
         onerror(error) {
-          console.error("Gemini Live error:", error);
+          console.error(
+            "Gemini Live error:",
+            error
+          );
         },
 
         onclose(event) {
@@ -184,7 +204,7 @@ wss.on("connection", async (exotelWs) => {
 
     console.log("Gemini session ready.");
 
-    // Initial greeting.
+    // Ask Gemini to generate the initial greeting.
     geminiSession.sendClientContent({
       turns: [
         {
@@ -192,7 +212,7 @@ wss.on("connection", async (exotelWs) => {
           parts: [
             {
               text:
-                "The phone call has just connected. Greet the caller naturally and briefly.",
+                "The phone call has just connected. Give a short, natural greeting to the caller.",
             },
           ],
         },
@@ -200,61 +220,76 @@ wss.on("connection", async (exotelWs) => {
       turnComplete: true,
     });
 
-    exotelWs.on("message", async (raw) => {
-      if (closed) return;
+    exotelWs.on("message", (raw) => {
+      if (closed || !geminiSession) {
+        return;
+      }
 
       let message;
 
       try {
         message = JSON.parse(raw.toString());
       } catch {
-        console.error("Invalid Exotel JSON.");
+        console.error(
+          "Received invalid Exotel JSON."
+        );
         return;
       }
 
       switch (message.event) {
         case "connected":
-          console.log("Exotel event: connected");
+          console.log(
+            "Exotel event: connected"
+          );
           break;
 
-        case "start":
+        case "start": {
           streamSid =
             message.stream_sid ||
             message.start?.stream_sid ||
             null;
 
-          console.log("Exotel stream started:", streamSid);
+          console.log(
+            "Exotel stream started:",
+            streamSid
+          );
 
           console.log(
-            "Audio format:",
-            message.start?.media_format
+            "Exotel media format:",
+            JSON.stringify(
+              message.start?.media_format || {}
+            )
           );
+
           break;
+        }
 
         case "media": {
-          const payload = message.media?.payload;
+          const payload =
+            message.media?.payload;
 
-          if (!payload || !geminiSession) {
+          if (!payload) {
             return;
           }
 
-          const exotelAudio = Buffer.from(
-            payload,
-            "base64"
-          );
+          const exotelAudio =
+            Buffer.from(payload, "base64");
 
-          // Exotel default: 8 kHz PCM
-          // Gemini input: 16 kHz PCM
-          const geminiAudio = resamplePCM16(
-            exotelAudio,
-            8000,
-            16000
-          );
+          // Exotel -> Gemini
+          // 8 kHz PCM -> 16 kHz PCM.
+          const geminiAudio =
+            resamplePCM16(
+              exotelAudio,
+              8000,
+              16000
+            );
 
           geminiSession.sendRealtimeInput({
             audio: {
-              data: geminiAudio.toString("base64"),
-              mimeType: "audio/pcm;rate=16000",
+              data:
+                geminiAudio.toString("base64"),
+              mimeType:
+                "audio/pcm;rate=16000",
             },
           });
 
@@ -271,14 +306,16 @@ wss.on("connection", async (exotelWs) => {
         case "stop":
           console.log(
             "Exotel stream stopped:",
-            message.stop?.reason
+            message.stop?.reason || "unknown"
           );
 
           closeSession();
           break;
 
         case "clear":
-          console.log("Exotel requested audio clear.");
+          console.log(
+            "Exotel requested audio clear."
+          );
           break;
 
         case "mark":
@@ -286,24 +323,31 @@ wss.on("connection", async (exotelWs) => {
 
         default:
           console.log(
-            "Unknown Exotel event:",
+            "Exotel event:",
             message.event
           );
       }
     });
 
     exotelWs.on("close", () => {
-      console.log("Exotel WebSocket closed.");
+      console.log(
+        "Exotel WebSocket disconnected."
+      );
       closeSession();
     });
 
     exotelWs.on("error", (error) => {
-      console.error("Exotel WebSocket error:", error);
+      console.error(
+        "Exotel WebSocket error:",
+        error
+      );
       closeSession();
     });
 
     function closeSession() {
-      if (closed) return;
+      if (closed) {
+        return;
+      }
 
       closed = true;
 
@@ -315,7 +359,7 @@ wss.on("connection", async (exotelWs) => {
     }
   } catch (error) {
     console.error(
-      "Failed to create Gemini session:",
+      "Failed to start Gemini session:",
       error
     );
 
@@ -325,50 +369,91 @@ wss.on("connection", async (exotelWs) => {
   }
 });
 
-function resamplePCM16(buffer, inputRate, outputRate) {
+/**
+ * Simple linear PCM16 resampler.
+ *
+ * input:
+ *   Buffer containing signed 16-bit little-endian PCM
+ *
+ * output:
+ *   Buffer containing signed 16-bit little-endian PCM
+ */
+function resamplePCM16(
+  buffer,
+  inputRate,
+  outputRate
+) {
   if (inputRate === outputRate) {
     return buffer;
   }
 
-  const inputSamples = Math.floor(buffer.length / 2);
+  const inputSamples =
+    Math.floor(buffer.length / 2);
 
   if (inputSamples <= 1) {
     return buffer;
   }
 
-  const outputSamples = Math.floor(
-    inputSamples * outputRate / inputRate
-  );
-
-  const output = Buffer.alloc(outputSamples * 2);
-
-  for (let i = 0; i < outputSamples; i++) {
-    const sourcePosition =
-      i * (inputSamples - 1) /
-      Math.max(1, outputSamples - 1);
-
-    const leftIndex = Math.floor(sourcePosition);
-    const rightIndex = Math.min(
-      leftIndex + 1,
-      inputSamples - 1
+  const outputSamples =
+    Math.max(
+      1,
+      Math.floor(
+        inputSamples *
+          outputRate /
+          inputRate
+      )
     );
+
+  const output =
+    Buffer.alloc(outputSamples * 2);
+
+  for (
+    let i = 0;
+    i < outputSamples;
+    i++
+  ) {
+    const sourcePosition =
+      i *
+      (inputSamples - 1) /
+      Math.max(
+        1,
+        outputSamples - 1
+      );
+
+    const leftIndex =
+      Math.floor(sourcePosition);
+
+    const rightIndex =
+      Math.min(
+        leftIndex + 1,
+        inputSamples - 1
+      );
 
     const fraction =
       sourcePosition - leftIndex;
 
     const left =
-      buffer.readInt16LE(leftIndex * 2);
+      buffer.readInt16LE(
+        leftIndex * 2
+      );
 
     const right =
-      buffer.readInt16LE(rightIndex * 2);
+      buffer.readInt16LE(
+        rightIndex * 2
+      );
 
     const sample =
-      left + (right - left) * fraction;
+      left +
+      (right - left) *
+        fraction;
 
     output.writeInt16LE(
       Math.max(
         -32768,
-        Math.min(32767, Math.round(sample))
+        Math.min(
+          32767,
+          Math.round(sample)
+        )
       ),
       i * 2
     );
@@ -379,6 +464,6 @@ function resamplePCM16(buffer, inputRate, outputRate) {
 
 server.listen(PORT, () => {
   console.log(
-    `Telugu-English Phone Assistant listening on port ${PORT}`
+    `Telugu-English Phone Assistant running on port ${PORT}`
   );
 });
